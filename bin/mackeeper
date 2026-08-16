@@ -10,12 +10,10 @@ MK_DIR="$HOME/.mackeeper"
 MK_CONFIG="$MK_DIR/config"
 MK_HISTORY="$MK_DIR/history.log"
 MK_VERSION="0.0.1-beta"
-BASH3=$( [[ "${BASH_VERSION%%.*}" -lt 4 ]] && echo yes || echo no )
 
 # ---------- tput colors (no dialog/whiptail dependency) ----------
 BOLD=$(tput bold 2>/dev/null)
 DIM=$(tput dim 2>/dev/null)
-UL=$(tput smul 2>/dev/null)
 RST=$(tput sgr0 2>/dev/null)
 RED=$(tput setaf 1 2>/dev/null)
 GRN=$(tput setaf 2 2>/dev/null)
@@ -24,7 +22,6 @@ BLU=$(tput setaf 4 2>/dev/null)
 MAG=$(tput setaf 5 2>/dev/null)
 CYN=$(tput setaf 6 2>/dev/null)
 WHT=$(tput setaf 7 2>/dev/null)
-BG_RED=$(tput setab 1 2>/dev/null)
 
 # ---------- globals ----------
 USER_NAME=""
@@ -75,7 +72,7 @@ pbar() {
     [ "$pct" -gt 100 ] && pct=100
     filled=$(( cur * w / total ))
     [ "$filled" -gt "$w" ] && filled=$w
-    printf '\r%s%3d%%%s [%s' "$(color green)" "$pct" "$RST"
+    printf '\r%s%3d%%%s [' "$(color green)" "$pct" "$RST"
     if [ "$filled" -gt 0 ]; then
         for i in $(seq 1 "$filled"); do printf '#'; done
     fi
@@ -349,7 +346,8 @@ cat_homebrew() {
     if ! command -v brew >/dev/null 2>&1; then
         cprint yellow "  brew not installed.\n"; say ""; return
     fi
-    local cdir=$(brew --cache 2>/dev/null)
+    local cdir
+    cdir=$(brew --cache 2>/dev/null)
     say "  cache dir: $cdir"
     say ""
     if [ "$mode" = "dry" ]; then
@@ -378,8 +376,10 @@ cat_uv() {
     if ! command -v uv >/dev/null 2>&1; then
         cprint yellow "  uv not installed.\n"; say ""; return
     fi
-    local cdir=$(uv cache dir 2>/dev/null)
-    local sz=$(hsize "$cdir" 2>/dev/null)
+    local cdir
+    cdir=$(uv cache dir 2>/dev/null)
+    local sz
+    sz=$(hsize "$cdir" 2>/dev/null)
     item_row "safe" "$sz" "uv wheel cache"
     say ""
     if [ "$mode" = "apply" ] && confirm "Clear the uv cache?"; then
@@ -398,7 +398,8 @@ cat_npm() {
     if ! command -v npm >/dev/null 2>&1; then
         cprint yellow "  npm not installed.\n"; say ""; return
     fi
-    local sz=$(hsize "$HOME/.npm" 2>/dev/null)
+    local sz
+    sz=$(hsize "$HOME/.npm" 2>/dev/null)
     item_row "safe" "$sz" "npm cache (also 'npm cache verify' first)"
     say ""
     if [ "$mode" = "apply" ] && confirm "Run 'npm cache clean --force'?"; then
@@ -417,7 +418,8 @@ cat_coursier() {
     if ! command -v coursier >/dev/null 2>&1; then
         cprint yellow "  coursier not installed.\n"; say ""; return
     fi
-    local sz=$(hsize "$HOME/Library/Caches/Coursier" 2>/dev/null)
+    local sz
+    sz=$(hsize "$HOME/Library/Caches/Coursier" 2>/dev/null)
     item_row "safe" "$sz" "Scala/JVM artifact cache"
     say ""
     if [ "$mode" = "apply" ] && confirm "Run 'coursier cache clean'?"; then
@@ -435,7 +437,8 @@ cat_docker() {
     say "  ─────────────────────────────────────────────────"
     if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
         cprint yellow "  Docker daemon not running.\n"
-        local vmsz=$(hsize "$HOME/Library/Containers/com.docker.docker/Data/vms" 2>/dev/null)
+        local vmsz
+        vmsz=$(hsize "$HOME/Library/Containers/com.docker.docker/Data/vms" 2>/dev/null)
         [ -n "$vmsz" ] && { say "  (VM disk on disk: $vmsz — starts when Docker Desktop runs)"; }
         say ""; return
     fi
@@ -444,7 +447,8 @@ cat_docker() {
     say ""
     docker system df
     say ""
-    local running=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
+    local running
+    running=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
     if [ "$running" -gt 0 ]; then
         cprint yellow "  ${running} container(s) are running — prune will NOT stop them,\n"
         cprint yellow "  but stopped containers + unused images/volumes will be removed.\n"
@@ -507,8 +511,9 @@ cat_logs() {
     say ""
     cprint white "${BOLD}■ Logs  (~/Library/Logs)${RST}  ${DIM}mostly safe${RST}"
     say "  ─────────────────────────────────────────────────"
-    local sz=$(hsize "$HOME/Library/Logs" 2>/dev/null)
-    item_row "safe" "$sz" "~/Library/Logs"
+    local sz
+    sz=$(hsize "$HOME/Library/Logs" 2>/dev/null)
+    item_row "safe" "$sz" "$HOME/Library/Logs"
     say ""
     if [ "$mode" = "apply" ] && confirm "Trash ~/Library/Logs contents?"; then
         local before ok0 fail0
@@ -527,7 +532,8 @@ cat_downloads() {
     local i=0 total=0
     while IFS= read -r f; do
         i=$((i+1))
-        local sz=$(hsize_bytes "$f")
+        local sz
+        sz=$(hsize_bytes "$f")
         total=$((total + sz))
         item_row "safe" "$(hsize "$f")" "$(basename "$f")"
     done < <(find "$HOME/Downloads" -maxdepth 1 -type f -mtime "+$cutoff_days" 2>/dev/null)
@@ -550,8 +556,9 @@ cat_trash() {
     say ""
     cprint white "${BOLD}■ Trash  (~/.Trash)${RST}  ${RED}permanent — cannot undo${RST}"
     say "  ─────────────────────────────────────────────────"
-    local sz=$(hsize "$HOME/.Trash" 2>/dev/null)
-    item_row "risky" "$sz" "~/.Trash (all contents)"
+    local sz
+    sz=$(hsize "$HOME/.Trash" 2>/dev/null)
+    item_row "risky" "$sz" "$HOME/.Trash (all contents)"
     say ""
     local count=0
     count=$(ls -A "$HOME/.Trash" 2>/dev/null | wc -l | tr -d ' ')
@@ -735,10 +742,10 @@ main_menu() {
         center "${DIM}interactive storage doctor for macOS${RST}"
         say ""
         say ""
-        printf '  %s[%s] %s Full scan report%s\n' "$(color cyan)" "1" "$RST" "$(color white)"
-        printf '  %s[%s] %s Clean a category…%s\n'  "$(color cyan)" "2" "$RST"
-        printf '  %s[%s] %s Profile / history%s\n'   "$(color cyan)" "3" "$RST"
-        printf '  %s[%s] %s Exit%s\n'                "$(color cyan)" "4" "$RST"
+        printf '  %s[%s]%s %s%s\n' "$(color cyan)" "1" "$RST" "$(color white)" "Full scan report"
+        printf '  %s[%s]%s %s%s\n' "$(color cyan)" "2" "$RST" "$(color white)" "Clean a category…"
+        printf '  %s[%s]%s %s%s\n' "$(color cyan)" "3" "$RST" "$(color white)" "Profile / history"
+        printf '  %s[%s]%s %s%s\n' "$(color cyan)" "4" "$RST" "$(color white)" "Exit"
         say ""
         say "  ${DIM}Signed in as ${BOLD}$USER_NAME${RST}${DIM} · last run saved to ~/.mackeeper/history.log${RST}"
         say ""
