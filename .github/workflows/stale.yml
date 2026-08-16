@@ -15,6 +15,7 @@ jobs:
     steps:
       - uses: actions/stale@v9
         with:
+          # auto-run scheduled; also runnable manually from the Actions tab
           stale-issue-message: >
             This issue has been inactive for 60 days and will be closed soon.
             If it's still relevant, please leave a comment to keep it open.
