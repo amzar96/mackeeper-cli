@@ -1,0 +1,18 @@
+# Keep GitHub Actions and other managed dependencies up to date.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "type:chore"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    reviewers:
+      - "amzar96"

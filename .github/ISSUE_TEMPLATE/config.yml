@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions
+    url: https://github.com/amzar96/mackeeper-cli/discussions
+    about: Ask questions, share ideas, or show off your setup.
+  - name: Security
+    url: https://github.com/amzar96/mackeeper-cli/security/advisories
+    about: Please report security vulnerabilities here (or email the maintainers directly — do NOT open a public issue).

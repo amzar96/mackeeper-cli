@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  syntax-check:
+    name: Bash syntax check (3.2)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check with macOS bash 3.2
+        run: |
+          /bin/bash -n bin/mackeeper
+          echo "syntax OK"
+      - name: Confirm shebang and version banner
+        run: |
+          head -1 bin/mackeeper | grep -q "#!/usr/bin/env bash" && echo "shebang OK"
+          grep -q 'MK_VERSION="0.0.1-beta"' bin/mackeeper && echo "version OK"
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Run shellcheck (non-blocking for bash 3.2 style)
+        run: shellcheck -x -s bash -S error bin/mackeeper || true
+
+  smoke-test:
+    name: Smoke test (dry-run categories)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dry-run scan report
+        run: |
+          bash -c 'source bin/mackeeper; scan_overall' 
+          echo "scan_overall OK"
+      - name: Dry-run safe categories
+        run: |
+          bash -c 'source bin/mackeeper; run_category npm dry; run_category logs dry' 2>&1 | head -20
+          echo "dry-run OK"
+      - name: Verify guard rails refuse dangerous paths
+        run: |
+          bash -c 'source bin/mackeeper; trash_path "$HOME"; [ $? -eq 1 ]' || { echo "FAIL: home not refused"; exit 1; }
+          bash -c 'source bin/mackeeper; trash_path "/Users/x/../../etc/passwd"; [ $? -eq 1 ]' || { echo "FAIL: traversal not refused"; exit 1; }
+          bash -c 'source bin/mackeeper; trash_path "/"; [ $? -eq 1 ]' || { echo "FAIL: root not refused"; exit 1; }
+          echo "guard rails OK"

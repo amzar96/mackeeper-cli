@@ -1,0 +1,764 @@
+#!/usr/bin/env bash
+# mackeeper.sh - interactive storage doctor for macOS
+# Safe by default: every action is dry-run first, deletions go to Trash.
+
+set -u
+PS4=''
+
+# ---------- config ----------
+MK_DIR="$HOME/.mackeeper"
+MK_CONFIG="$MK_DIR/config"
+MK_HISTORY="$MK_DIR/history.log"
+MK_VERSION="0.0.1-beta"
+BASH3=$( [[ "${BASH_VERSION%%.*}" -lt 4 ]] && echo yes || echo no )
+
+# ---------- tput colors (no dialog/whiptail dependency) ----------
+BOLD=$(tput bold 2>/dev/null)
+DIM=$(tput dim 2>/dev/null)
+UL=$(tput smul 2>/dev/null)
+RST=$(tput sgr0 2>/dev/null)
+RED=$(tput setaf 1 2>/dev/null)
+GRN=$(tput setaf 2 2>/dev/null)
+YEL=$(tput setaf 3 2>/dev/null)
+BLU=$(tput setaf 4 2>/dev/null)
+MAG=$(tput setaf 5 2>/dev/null)
+CYN=$(tput setaf 6 2>/dev/null)
+WHT=$(tput setaf 7 2>/dev/null)
+BG_RED=$(tput setab 1 2>/dev/null)
+
+# ---------- globals ----------
+USER_NAME=""
+THEME="cyn"
+SCAN_ITEMS=0
+SCAN_BYTES=0
+FREED_ITEMS=0
+FREED_BYTES=0
+TRASH_OK=0
+TRASH_FAIL=0
+SPIN=("|" "/" "-" "\\")
+
+# ---------- helpers ----------
+say()  { printf '%s\n' "$*"; }
+n()    { printf '\n'; }
+
+color() {
+    case "$1" in
+        red) printf '%s' "$RED";; green) printf '%s' "$GRN";;
+        yellow) printf '%s' "$YEL";; blue) printf '%s' "$BLU";;
+        cyan) printf '%s' "$CYN";; magenta) printf '%s' "$MAG";;
+        white) printf '%s' "$WHT";; *) printf '%s' "$RST";;
+    esac
+}
+
+# prints text in a color
+cprint() { color "$1"; shift; printf '%b' "$*"; printf '%s' "$RST"; }
+
+hsize() {
+    if [ -e "$1" ]; then
+        local out
+        out=$(du -sh "$1" 2>/dev/null | cut -f1)
+        [ -n "$out" ] && echo "$out" || echo "n/a"
+    else
+        echo "0B"
+    fi
+}
+hsize_bytes() { [ -e "$1" ] && du -sk "$1" 2>/dev/null | cut -f1 || echo 0; }
+
+# ---------- progress bar & spinner ----------
+# render a determinate progress bar on a single line
+pbar() {
+    # usage: pbar <cur> <total> <label> [width]
+    local cur="$1" total="$2" label="$3" w="${4:-36}"
+    local pct filled i
+    [ "$total" -lt 1 ] && total=1
+    pct=$(( cur * 100 / total ))
+    [ "$pct" -gt 100 ] && pct=100
+    filled=$(( cur * w / total ))
+    [ "$filled" -gt "$w" ] && filled=$w
+    printf '\r%s%3d%%%s [%s' "$(color green)" "$pct" "$RST"
+    if [ "$filled" -gt 0 ]; then
+        for i in $(seq 1 "$filled"); do printf '#'; done
+    fi
+    if [ "$filled" -lt "$w" ]; then
+        for i in $(seq $((filled+1)) "$w"); do printf '.'; done
+    fi
+    printf '] %s%s%s%s' "$(color cyan)" "$label" "$RST" "$(printf '\033[K')"
+}
+
+# run a command in the background while a spinner animates;
+# stdout is captured to $1 (caller reads it after)
+# usage: spin_out <outfile> <label> -- <cmd...>
+spin_out() {
+    local outfile="$1" label="$2"; shift 2
+    [ "$1" = "--" ] && shift
+    : > "$outfile"
+    "$@" > "$outfile" 2>/dev/null &
+    local pid=$! i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf '\r%s%s %s%s%s' "$(color cyan)" "$label" "$RST" "${SPIN[$((i%4))]}" "$(printf '\033[K')"
+        i=$((i+1)); sleep 0.1
+    done
+    wait "$pid"
+    printf '\r%s\n' "$(printf '\033[K')"
+    return $?
+}
+
+hr() {
+    local w=${COLUMNS:-80}
+    local i=0
+    while [ "$i" -lt "$w" ]; do printf '%s' "${1:--}"; i=$((i+1)); done
+    say ""
+}
+
+# a simple centering banner
+center() {
+    local text="$1" w=${COLUMNS:-80} pad
+    pad=$(( (w - ${#text}) / 2 ))
+    [ "$pad" -lt 0 ] && pad=0
+    printf '%*s%s%s%s%s\n' "$pad" "" "$(color "$THEME")" "$text" "$RST" ""
+}
+
+# converts KB to human readable
+hrk() {
+    local kb=$1
+    local bytes=$((kb * 1024))
+    if   [ "$bytes" -ge 1073741824 ]; then awk -v b="$bytes" 'BEGIN{printf "%.2f GB", b/1073741824}'
+    elif [ "$bytes" -ge 1048576 ];   then awk -v b="$bytes" 'BEGIN{printf "%.1f MB", b/1048576}'
+    else printf '%d KB' "$kb"
+    fi
+}
+
+# free space on the boot volume in KB
+free_kb() { df -k / 2>/dev/null | awk 'NR==2{print $4}'; }
+
+confirm() {
+    local prompt="${1:-Proceed?}"
+    local resp
+    printf '%s%s [y/N]: %s' "$(color yellow)" "$prompt" "$RST"
+    read -r resp
+    case "$resp" in
+        y|Y|yes|YES) return 0;;
+        *) return 1;;
+    esac
+}
+
+# ---------- profile ----------
+TOTAL_FREED_KB=0
+mk_init() {
+    [ -d "$MK_DIR" ] || mkdir -p "$MK_DIR"
+    if [ -f "$MK_CONFIG" ]; then
+        USER_NAME=$(grep '^name=' "$MK_CONFIG" | cut -d= -f2)
+        THEME=$(grep '^theme=' "$MK_CONFIG" | cut -d= -f2)
+        TOTAL_FREED_KB=$(grep '^total_freed=' "$MK_CONFIG" | cut -d= -f2)
+        [ -z "$THEME" ] && THEME="cyn"
+        [ -z "$TOTAL_FREED_KB" ] && TOTAL_FREED_KB=0
+    fi
+}
+
+mk_save_config() {
+    printf 'name=%s\ntheme=%s\ntotal_freed=%s\ncreated=%s\n' "$USER_NAME" "$THEME" "$TOTAL_FREED_KB" "$(date '+%Y-%m-%d %H:%M')" > "$MK_CONFIG"
+}
+
+mk_welcome() {
+    say ""
+    center "${BOLD}░░░ mackeeper v$MK_VERSION ░░░${RST}"
+    say ""
+    if [ -z "$USER_NAME" ]; then
+        cprint cyan "Welcome! This is a local storage doctor.\n"
+        cprint white "No accounts, no network. Just scans + safe Trash-based cleaning.\n"
+        printf '%sWhat should I call you?%s ' "$(color cyan)" "$RST"
+        read -r USER_NAME
+        [ -z "$USER_NAME" ] && USER_NAME="friend"
+        mk_save_config
+    fi
+    say ""
+    cprint green "Welcome back, ${BOLD}${USER_NAME}${RST}${GRN}!${RST}"
+    say ""
+}
+
+# ---------- history ----------
+mk_log() {
+    local msg="$1"
+    [ -f "$MK_HISTORY" ] || printf '# date | action | detail\n' > "$MK_HISTORY"
+    printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M')" "$msg" >> "$MK_HISTORY"
+}
+
+# ---------- top-level report ----------
+scan_overall() {
+    local df_line total used avail pct
+    df_line=$(df -h / | tail -1)
+    total=$(echo "$df_line" | awk '{print $2}')
+    used=$(echo "$df_line" | awk '{print $3}')
+    avail=$(echo "$df_line" | awk '{print $4}')
+    pct=$(echo "$df_line" | awk '{print $5}' | tr -d '%')
+    say ""
+    cprint white "  ${BOLD}Disk Overview${RST}  $(uname -s) $(sw_vers -productVersion)"
+    say "  ─────────────────────────────────────"
+    say "  Total   : ${BOLD}$total${RST}"
+    say "  Used    : $used (${BOLD}${pct}%${RST})"
+    say "  Free    : ${GRN}$avail${RST}"
+    say ""
+}
+
+scan_home_top() {
+    say "  ${BOLD}Top consumers in $HOME${RST}"
+    say "  ─────────────────────────────────────"
+    local i=0 total=0
+    for e in "$HOME"/*; do [ -e "$e" ] && total=$((total+1)); done
+    pbar 0 "$total" "scanning home…"
+    local sizes=()
+    local names=()
+    i=0
+    while IFS=$'\t' read -r size dir; do
+        [ -z "$dir" ] && continue
+        i=$((i+1))
+        pbar "$i" "$total" "scanning home…"
+        sizes[${#sizes[@]}]="$size"
+        names[${#names[@]}]="$dir"
+    done < <(du -sh "$HOME"/* 2>/dev/null | sort -rh)
+    printf '\r%s\n' "$(printf '\033[K')"
+    i=0
+    for size in "${sizes[@]}"; do
+        i=$((i+1))
+        [ "$i" -gt 8 ] && break
+        printf '  %s%8s %s%s\n' "$(color green)" "$size" "$RST" "${names[$((i-1))]}"
+    done
+    say ""
+}
+
+# ---------- safety levels & trash engine ----------
+# LEVEL: safe / warn / risky
+item_row() {
+    # usage: item_row <level> <size> <name>
+    local level="$1" size="$2" name="$3" lc
+    case "$level" in
+        safe)  lc=green;  symbol="  ";;
+        warn)  lc=yellow; symbol="${YEL}!${RST} ";;
+        risky) lc=red;    symbol="${RED}!!${RST} ";;
+    esac
+    printf '  %s%s %s%s  %8s  %s\n' "$(color "$lc")" "$symbol" "$RST" "$(color green)$size$(color "$lc")" "$RST" "$name"
+}
+
+# trash one path safely; never trash home or root-level path
+trash_path() {
+    local target="$1"
+    local clean="${target%/}"
+    case "$clean" in
+        *..*|*'*'*) TRASH_FAIL=$((TRASH_FAIL+1)); cprint red "  refused: suspicious path $clean\n"; return 1;;
+    esac
+    [ "$clean" = "$HOME" ] && { TRASH_FAIL=$((TRASH_FAIL+1)); cprint red "  refused: cannot trash your home directory\n"; return 1; }
+    [ "$clean" = "/" ] && { TRASH_FAIL=$((TRASH_FAIL+1)); cprint red "  refused: cannot trash root\n"; return 1; }
+    [ -e "$clean" ] || return 1
+    local sz
+    sz=$(hsize_bytes "$clean")
+    if /usr/bin/trash "$clean" 2>/dev/null; then
+        TRASH_OK=$((TRASH_OK+1))
+        FREED_BYTES=$((FREED_BYTES + sz))
+        TOTAL_FREED_KB=$((TOTAL_FREED_KB + sz))
+        FREED_ITEMS=$((FREED_ITEMS+1))
+        mk_log "trashed $clean"
+        return 0
+    else
+        TRASH_FAIL=$((TRASH_FAIL+1))
+        return 1
+    fi
+}
+
+# summary of a batch of trash_path calls (run after the batch)
+summary_batch() {
+    local label="$1" bytes_before="$2" ok_before="$3" fail_before="$4"
+    local ok_now=$TRASH_OK fail_now=$TRASH_FAIL
+    local ok=$((ok_now - ok_before)) fail=$((fail_now - fail_before))
+    local bytes=$((FREED_BYTES - bytes_before))
+    say ""
+    say "  ── ${BOLD}$label${RST} result ───────────────────────────"
+    say "   ${GRN}✓${RST} trashed : ${BOLD}$ok${RST} item(s)   (${BOLD}$(hrk "$bytes")${RST} → Trash)"
+    if [ "$fail" -gt 0 ]; then
+        say "   ${RED}✗${RST} skipped : $fail item(s)   (${DIM}macOS-protected, needs Full Disk Access${RST})"
+    fi
+    say ""
+    mk_save_config
+}
+
+# ---------- category framework ----------
+# Each category provides a function like cat_<name> <dry|apply>
+# that reports rows via item_row and, in apply mode, calls trash_path / specific command.
+
+# macOS system cache dirs that TCC blocks terminal from trashing
+is_system_cache() {
+    local b
+    b=$(basename "$1")
+    case "$b" in
+        com.apple.*|CloudKit|FamilyCircle|com.google.GoogleUpdater) return 0;;
+    esac
+    return 1
+}
+
+cat_caches() {
+    local mode="$1"
+    say ""
+    cprint white "${BOLD}■ Caches  (~/Library/Caches)${RST}  ${DIM}safe to clear${RST}"
+    say "  ─────────────────────────────────────────────────"
+    local dirs=()
+    for d in "$HOME"/Library/Caches/*/; do
+        [ -d "$d" ] && dirs[${#dirs[@]}]="$d"
+    done
+    local total=${#dirs[@]} i=0 szs=()
+    pbar 0 "$total" "scanning caches…"
+    for d in "${dirs[@]}"; do
+        i=$((i+1))
+        pbar "$i" "$total" "scanning caches…"
+        szs[${#szs[@]}]="$(hsize_bytes "$d")"
+    done
+    printf '\r%s\n' "$(printf '\033[K')"
+    local total=0 sys=0
+    for i in "${!szs[@]}"; do
+        local sz="${szs[$i]}"
+        total=$((total + sz))
+        SCAN_BYTES=$((SCAN_BYTES + sz))
+        SCAN_ITEMS=$((SCAN_ITEMS + 1))
+        if is_system_cache "${dirs[$i]}"; then
+            sys=$((sys+1))
+            item_row "warn" "$(hsize "${dirs[$i]}")" "$(basename "${dirs[$i]}") ${DIM}(system — needs Full Disk Access)${RST}"
+        else
+            item_row "safe" "$(hsize "${dirs[$i]}")" "$(basename "${dirs[$i]}")"
+        fi
+    done
+    say ""
+    cprint green "  ~ ${#dirs[@]} cache dirs ~ ${BOLD}$(hrk "$total")${RST}"
+    [ "$sys" -gt 0 ] && cprint yellow "  $sys are macOS system caches — skipped unless Terminal has Full Disk Access.\n"
+    say ""
+    if [ "$mode" = "apply" ]; then
+        if confirm "Trash the user caches (system caches auto-skipped)?"; then
+            local before ok0 fail0
+            before=$((FREED_BYTES)); ok0=$TRASH_OK; fail0=$TRASH_FAIL
+            for d in "${dirs[@]}"; do
+                is_system_cache "$d" && continue
+                trash_path "$d"
+            done
+            summary_batch "Caches" "$before" "$ok0" "$fail0"
+        fi
+    fi
+}
+
+cat_homebrew() {
+    local mode="$1"
+    say ""
+    cprint white "${BOLD}■ Homebrew cache${RST}  ${DIM}re-downloaded on demand${RST}"
+    say "  ─────────────────────────────────────────────────"
+    if ! command -v brew >/dev/null 2>&1; then
+        cprint yellow "  brew not installed.\n"; say ""; return
+    fi
+    local cdir=$(brew --cache 2>/dev/null)
+    say "  cache dir: $cdir"
+    say ""
+    if [ "$mode" = "dry" ]; then
+        say "  ${DIM}Running 'brew cleanup -n' (dry-run)…${RST}"
+        say ""
+        local out tmp
+        tmp=$(mktemp)
+        spin_out "$tmp" "brew cleanup -n" -- brew cleanup -n
+        out=$(cat "$tmp"); rm -f "$tmp"
+        [ -z "$out" ] && cprint green "  Nothing to clean.\n" || { say "$out"; say ""; }
+    else
+        if confirm "Run 'brew cleanup -s' (prune + scrub old versions)?"; then
+            brew cleanup -s
+            mk_log "brew cleanup -s"
+            say ""
+            cprint green "  brew cache cleaned.\n"
+        fi
+    fi
+}
+
+cat_uv() {
+    local mode="$1"
+    say ""
+    cprint white "${BOLD}■ uv cache  (~/.cache/uv)${RST}  ${DIM}safe to clear${RST}"
+    say "  ─────────────────────────────────────────────────"
+    if ! command -v uv >/dev/null 2>&1; then
+        cprint yellow "  uv not installed.\n"; say ""; return
+    fi
+    local cdir=$(uv cache dir 2>/dev/null)
+    local sz=$(hsize "$cdir" 2>/dev/null)
+    item_row "safe" "$sz" "uv wheel cache"
+    say ""
+    if [ "$mode" = "apply" ] && confirm "Clear the uv cache?"; then
+        uv cache clean
+        mk_log "uv cache clean"
+        say ""
+        cprint green "  uv cache cleared.\n"
+    fi
+}
+
+cat_npm() {
+    local mode="$1"
+    say ""
+    cprint white "${BOLD}■ npm cache  (~/.npm)${RST}  ${DIM}safe to clear${RST}"
+    say "  ─────────────────────────────────────────────────"
+    if ! command -v npm >/dev/null 2>&1; then
+        cprint yellow "  npm not installed.\n"; say ""; return
+    fi
+    local sz=$(hsize "$HOME/.npm" 2>/dev/null)
+    item_row "safe" "$sz" "npm cache (also 'npm cache verify' first)"
+    say ""
+    if [ "$mode" = "apply" ] && confirm "Run 'npm cache clean --force'?"; then
+        npm cache clean --force 2>/dev/null
+        mk_log "npm cache clean --force"
+        say ""
+        cprint green "  npm cache cleaned.\n"
+    fi
+}
+
+cat_coursier() {
+    local mode="$1"
+    say ""
+    cprint white "${BOLD}■ Coursier cache  (~/Library/Caches/Coursier)${RST}  ${DIM}re-downloaded on demand${RST}"
+    say "  ─────────────────────────────────────────────────"
+    if ! command -v coursier >/dev/null 2>&1; then
+        cprint yellow "  coursier not installed.\n"; say ""; return
+    fi
+    local sz=$(hsize "$HOME/Library/Caches/Coursier" 2>/dev/null)
+    item_row "safe" "$sz" "Scala/JVM artifact cache"
+    say ""
+    if [ "$mode" = "apply" ] && confirm "Run 'coursier cache clean'?"; then
+        coursier cache clean 2>/dev/null
+        mk_log "coursier cache clean"
+        say ""
+        cprint green "  Coursier cache cleaned.\n"
+    fi
+}
+
+cat_docker() {
+    local mode="$1"
+    say ""
+    cprint white "${BOLD}■ Docker${RST}  ${RED}!! risky ${RST}${DIM}your containers live here${RST}"
+    say "  ─────────────────────────────────────────────────"
+    if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+        cprint yellow "  Docker daemon not running.\n"
+        local vmsz=$(hsize "$HOME/Library/Containers/com.docker.docker/Data/vms" 2>/dev/null)
+        [ -n "$vmsz" ] && { say "  (VM disk on disk: $vmsz — starts when Docker Desktop runs)"; }
+        say ""; return
+    fi
+    say ""
+    say "  ${BOLD}docker system df${RST}"
+    say ""
+    docker system df
+    say ""
+    local running=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$running" -gt 0 ]; then
+        cprint yellow "  ${running} container(s) are running — prune will NOT stop them,\n"
+        cprint yellow "  but stopped containers + unused images/volumes will be removed.\n"
+    fi
+    say ""
+    if [ "$mode" = "apply" ]; then
+        say "  ${BOLD}Choose how aggressive:${RST}"
+        say "   1) Safe    → prune stopped containers + dangling images"
+        say "   2) Deep    → prune ALL unused images, networks, volumes (-a --volumes)"
+        say ""
+        printf '%sPick 1/2 or anything else to skip: %s' "$(color cyan)" "$RST"
+        local choice
+        read -r choice
+        case "$choice" in
+            1)
+                if confirm "docker container prune -f && docker image prune -f"; then
+                    local tmp
+                    tmp=$(mktemp)
+                    spin_out "$tmp" "pruning containers/images…" -- docker system prune -f
+                    rm -f "$tmp"
+                    mk_log "docker safe prune"
+                fi;;
+            2)
+                cprint red "  WARNING: deep prune removes ALL unused images/volumes.\n"
+                if confirm "Type YES to continue"; then
+                    local resp
+                    read -r resp
+                    if [ "$resp" = "YES" ]; then
+                        local tmp
+                        tmp=$(mktemp)
+                        spin_out "$tmp" "deep pruning (this may take a while)…" -- docker system prune -af --volumes
+                        rm -f "$tmp"
+                        mk_log "docker deep prune"
+                    fi
+                fi;;
+            *) say "  skipped.";;
+        esac
+    fi
+    say ""
+}
+
+cat_appsupport() {
+    local mode="$1"
+    say ""
+    cprint white "${BOLD}■ App Support (targeted)${RST}  ${DIM}only safe/cleaning items listed${RST}"
+    say "  ─────────────────────────────────────────────────"
+    local vm_bundles="$HOME/Library/Application Support/Claude/vm_bundles"
+    local updater="$HOME/Library/Application Support/Google/GoogleUpdater"
+    [ -d "$vm_bundles" ] && item_row "warn" "$(hsize "$vm_bundles")" "Claude VM bundles (re-downloaded when used)"
+    [ -d "$updater" ]   && item_row "warn" "$(hsize "$updater")"   "Google Updater leftovers"
+    say ""
+    if [ "$mode" = "apply" ]; then
+        [ -d "$vm_bundles" ] && confirm "Trash Claude VM bundles?" && { trash_path "$vm_bundles"/*; trash_path "$vm_bundles"; }
+        [ -d "$updater" ]   && confirm "Trash Google Updater leftovers?" && trash_path "$updater"
+        say ""
+    fi
+}
+cat_logs() {
+    local mode="$1"
+    say ""
+    cprint white "${BOLD}■ Logs  (~/Library/Logs)${RST}  ${DIM}mostly safe${RST}"
+    say "  ─────────────────────────────────────────────────"
+    local sz=$(hsize "$HOME/Library/Logs" 2>/dev/null)
+    item_row "safe" "$sz" "~/Library/Logs"
+    say ""
+    if [ "$mode" = "apply" ] && confirm "Trash ~/Library/Logs contents?"; then
+        local before ok0 fail0
+        before=$((FREED_BYTES)); ok0=$TRASH_OK; fail0=$TRASH_FAIL
+        for d in "$HOME"/Library/Logs/*; do [ -e "$d" ] && trash_path "$d"; done
+        summary_batch "Logs" "$before" "$ok0" "$fail0"
+    fi
+}
+
+cat_downloads() {
+    local mode="$1"
+    local cutoff_days="${2:-90}"
+    say ""
+    cprint white "${BOLD}■ Downloads older than $cutoff_days days${RST}"
+    say "  ─────────────────────────────────────────────────"
+    local i=0 total=0
+    while IFS= read -r f; do
+        i=$((i+1))
+        local sz=$(hsize_bytes "$f")
+        total=$((total + sz))
+        item_row "safe" "$(hsize "$f")" "$(basename "$f")"
+    done < <(find "$HOME/Downloads" -maxdepth 1 -type f -mtime "+$cutoff_days" 2>/dev/null)
+    if [ "$i" -eq 0 ]; then
+        cprint green "  Nothing older than $cutoff_days days in Downloads.\n"
+    else
+        cprint green "  ~ $i file(s), ${BOLD}$(hrk "$total")${RST}\n"
+        say ""
+        if [ "$mode" = "apply" ] && confirm "Trash these downloads?"; then
+            local before ok0 fail0
+            before=$((FREED_BYTES)); ok0=$TRASH_OK; fail0=$TRASH_FAIL
+            while IFS= read -r f; do trash_path "$f"; done < <(find "$HOME/Downloads" -maxdepth 1 -type f -mtime "+$cutoff_days" 2>/dev/null)
+            summary_batch "Downloads" "$before" "$ok0" "$fail0"
+        fi
+    fi
+    say ""
+}
+
+cat_trash() {
+    say ""
+    cprint white "${BOLD}■ Trash  (~/.Trash)${RST}  ${RED}permanent — cannot undo${RST}"
+    say "  ─────────────────────────────────────────────────"
+    local sz=$(hsize "$HOME/.Trash" 2>/dev/null)
+    item_row "risky" "$sz" "~/.Trash (all contents)"
+    say ""
+    local count=0
+    count=$(ls -A "$HOME/.Trash" 2>/dev/null | wc -l | tr -d ' ')
+    say "  ${count} item(s) currently in Trash."
+    say ""
+    if confirm "Empty the Trash permanently? This cannot be undone"; then
+        local resp
+        printf '%sType EMPTY to confirm: %s' "$(color red)" "$RST"
+        read -r resp
+        if [ "$resp" = "EMPTY" ]; then
+            rm -rf "$HOME"/.Trash/* 2>/dev/null
+            rm -rf "$HOME"/.Trash/.* 2>/dev/null
+            mk_log "emptied Trash"
+            cprint green "\n  Trash emptied.\n"
+        else
+            cprint yellow "  Aborted.\n"
+        fi
+    fi
+    say ""
+}
+
+cat_profile() {
+    say ""
+    cprint white "${BOLD}■ Profile & history${RST}"
+    say "  ─────────────────────────────────────────────────"
+    say "  Name  : ${BOLD}$USER_NAME${RST}"
+    say "  Theme : $THEME"
+    say ""
+    if [ -f "$MK_HISTORY" ]; then
+        say "  ${BOLD}Recent actions:${RST}"
+        tail -10 "$MK_HISTORY"
+    else
+        say "  No history yet."
+    fi
+    say ""
+    if [ "$TRASH_OK" -gt 0 ] || [ "$TRASH_FAIL" -gt 0 ]; then
+        local now diff pct
+        now=$(free_kb)
+        diff=$((now - FREE_BEFORE))
+        [ "$diff" -lt 0 ] && diff=0
+        [ "$FREE_BEFORE" -gt 0 ] && pct=$(awk -v d="$diff" -v b="$FREE_BEFORE" 'BEGIN{printf "%.2f", d/b*100}')
+        say "  ${BOLD}This session so far:${RST}"
+        say "   ${GRN}${BOLD}+$(hrk "$diff")${RST} freed (${BOLD}+${pct:-0}%${RST}) · $TRASH_OK trashed · $TRASH_FAIL skipped · all-time ${BOLD}$(hrk "$TOTAL_FREED_KB")${RST}"
+        say ""
+    fi
+    say ""
+    printf '%sChange theme? 1=cyan 2=green 3=magenta 4=blue (0=keep) : %s' "$(color cyan)" "$RST"
+    local t
+    read -r t
+    case "$t" in
+        1) THEME="cyn";; 2) THEME="grn";; 3) THEME="mag";; 4) THEME="blu";;
+    esac
+    mk_save_config
+}
+
+# ---------- category dispatcher ----------
+run_category() {
+    local name="$1" mode="${2:-dry}"
+    case "$name" in
+        caches)      cat_caches "$mode";;
+        homebrew)    cat_homebrew "$mode";;
+        uv)          cat_uv "$mode";;
+        npm)         cat_npm "$mode";;
+        coursier)    cat_coursier "$mode";;
+        docker)      cat_docker "$mode";;
+        appsupport)  cat_appsupport "$mode";;
+        logs)        cat_logs "$mode";;
+        downloads)   cat_downloads "$mode";;
+        trash)       cat_trash;;
+    esac
+}
+
+# ---------- category submenu ----------
+submenu() {
+    local choice
+    while true; do
+        say ""
+        cprint white "${BOLD}Clean a category${RST}"
+        say "  ─────────────────────────────────────"
+        say "   1) Caches          ~/Library/Caches"
+        say "   2) Homebrew        brew cleanup -s"
+        say "   3) uv cache        uv cache clean"
+        say "   4) npm cache       npm cache clean"
+        say "   5) Coursier        coursier cache clean"
+        say "   6) Docker          prune containers/images (${RED}risky${RST})"
+        say "   7) App Support     targeted safe items"
+        say "   8) Logs            ~/Library/Logs"
+        say "   9) Downloads > 90d old"
+        say "   t) Empty Trash     ${RED}permanent${RST}"
+        say "   0) Back to main menu"
+        say ""
+        printf '%sChoose: %s' "$(color cyan)" "$RST"
+        read -r choice
+        case "$choice" in
+            1) run_category caches dry; run_category caches apply;;
+            2) run_category homebrew dry; run_category homebrew apply;;
+            3) run_category uv dry; run_category uv apply;;
+            4) run_category npm dry; run_category npm apply;;
+            5) run_category coursier dry; run_category coursier apply;;
+            6) run_category docker dry; run_category docker apply;;
+            7) run_category appsupport dry; run_category appsupport apply;;
+            8) run_category logs dry; run_category logs apply;;
+            9) run_category downloads dry; run_category downloads apply;;
+            t) cat_trash;;
+            0) return;;
+        esac
+    done
+}
+
+# ---------- full report ----------
+full_report() {
+    clear
+    scan_overall
+    scan_home_top
+    cprint white "${BOLD}Category quick-scan${RST}"
+    say "  ─────────────────────────────────────"
+    local cats=("Caches:safe" "Homebrew cache:safe" "uv cache:safe" "npm cache:safe" "Coursier:safe" "Docker VM disk:warn" "Claude VMs:warn" "Chrome cache:safe" "Trash:risky")
+    local n=${#cats[@]} i=0 results=()
+    pbar 0 "$n" "measuring categories…"
+    local b c d p sz2
+    for b in "${cats[@]}"; do
+        i=$((i+1))
+        pbar "$i" "$n" "measuring categories…"
+        c="${b%%:*}"; d="${b##*:}"
+        case "$c" in
+            "Caches") p="$HOME/Library/Caches";;
+            "Homebrew cache") p="$HOME/Library/Caches/Homebrew";;
+            "uv cache") p="$HOME/.cache/uv";;
+            "npm cache") p="$HOME/.npm";;
+            "Coursier") p="$HOME/Library/Caches/Coursier";;
+            "Docker VM disk") p="$HOME/Library/Containers/com.docker.docker/Data/vms";;
+            "Claude VMs") p="$HOME/Library/Application Support/Claude/vm_bundles";;
+            "Chrome cache") p="$HOME/Library/Caches/Google";;
+            "Trash") p="$HOME/.Trash";;
+        esac
+        sz2=""
+        [ -e "$p" ] && sz2=$(hsize "$p")
+        results[${#results[@]}]="$c|$d|$sz2"
+    done
+    printf '\r%s\n' "$(printf '\033[K')"
+    for r in "${results[@]}"; do
+        c="${r%%|*}"; rest="${r#*|}"; d="${rest%%|*}"; sz2="${rest#*|}"
+        [ -n "$sz2" ] && item_row "$d" "$sz2" "$c"
+    done
+    say ""
+    cprint yellow "  Tips: red=risky, yellow=warn, green=safe. Deletions go to Trash first.\n"
+    say ""
+    printf '%s[Enter] back to menu %s' "$(color dim 2>/dev/null || true)" "$RST"
+    read -r _
+}
+
+# ---------- session savings report ----------
+session_report() {
+    say ""
+    say "  ${BOLD}◆ Session summary${RST}"
+    say "  ─────────────────────────────────────"
+    local now
+    now=$(free_kb)
+    local diff=$((now - FREE_BEFORE))
+    [ "$diff" -lt 0 ] && diff=0
+    local pct
+    [ "$FREE_BEFORE" -gt 0 ] && pct=$(awk -v d="$diff" -v b="$FREE_BEFORE" 'BEGIN{printf "%.2f", d/b*100}')
+    say "   free space : ${BOLD}$(hrk "$FREE_BEFORE")${RST}  →  ${GRN}${BOLD}$(hrk "$now")${RST}"
+    say "   gained     : ${GRN}${BOLD}+$(hrk "$diff")${RST}  (${GRN}${BOLD}+${pct:-0}%${RST} of start)"
+    say "   items trashed this run : ${BOLD}$TRASH_OK${RST}"
+    if [ "$TRASH_FAIL" -gt 0 ]; then
+        say "   skipped (macOS-protected): ${YEL}${BOLD}$TRASH_FAIL${RST}"
+    fi
+    say "   still in Trash (recoverable): ${BOLD}$(hrk "$FREED_BYTES")${RST}"
+    say "   all-time recovered (this tool): ${GRN}${BOLD}$(hrk "$TOTAL_FREED_KB")${RST}"
+    say ""
+    mk_log "session summary: freed $(hrk "$diff") (+${pct:-0}%), $TRASH_OK trashed, $TRASH_FAIL skipped"
+}
+
+# ---------- main menu ----------
+main_menu() {
+    local choice
+    while true; do
+        clear
+        center "${BOLD}${MAG}◆ mackeeper v$MK_VERSION${RST}"
+        center "${DIM}interactive storage doctor for macOS${RST}"
+        say ""
+        say ""
+        printf '  %s[%s] %s Full scan report%s\n' "$(color cyan)" "1" "$RST" "$(color white)"
+        printf '  %s[%s] %s Clean a category…%s\n'  "$(color cyan)" "2" "$RST"
+        printf '  %s[%s] %s Profile / history%s\n'   "$(color cyan)" "3" "$RST"
+        printf '  %s[%s] %s Exit%s\n'                "$(color cyan)" "4" "$RST"
+        say ""
+        say "  ${DIM}Signed in as ${BOLD}$USER_NAME${RST}${DIM} · last run saved to ~/.mackeeper/history.log${RST}"
+        say ""
+        printf '%sChoose: %s' "$(color green)" "$RST"
+        read -r choice
+        case "$choice" in
+            1) full_report;;
+            2) submenu;;
+            3) cat_profile; say ""; printf '%s[Enter] continue%s' "$(color dim)" "$RST"; read -r _;;
+            4) say ""; session_report; mk_save_config; cprint green "See you later, $USER_NAME! 🧹\n"; mk_log "session end"; exit 0;;
+        esac
+    done
+}
+
+# ---------- entry ----------
+FREE_BEFORE=0
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    mk_init
+    mk_welcome
+    FREE_BEFORE=$(free_kb)
+    mk_log "session start"
+    main_menu
+fi

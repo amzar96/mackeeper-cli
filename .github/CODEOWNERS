@@ -1,0 +1,7 @@
+# Default reviewers for the whole repo
+* @amzar96
+
+# Ownership of specific areas
+bin/mackeeper @amzar96
+.github/workflows/ @amzar96
+docs/ @amzar96

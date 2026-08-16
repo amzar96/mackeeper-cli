@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# mackeeper runtime (created in $HOME, not the repo — but just in case)
+.mackeeper/
+
+# Editors / OS
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Temp
+*.tmp
+*.log

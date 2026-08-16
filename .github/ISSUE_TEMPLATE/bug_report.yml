@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a bug in mackeeper-cli
+labels: ["type:bug", "status:needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill in as much detail as you can.
+  - type: input
+    id: version
+    attributes:
+      label: mackeeper-cli version
+      description: Run `grep MK_VERSION bin/mackeeper` or check `v0.0.1-beta` in the banner.
+      placeholder: "v0.0.1-beta"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: e.g. 15.7.4 (from `sw_vers -productVersion`)
+    validations:
+      required: true
+  - type: input
+    id: bash
+    attributes:
+      label: Bash version
+      description: Run `bash --version | head -1` (default macOS bash is 3.2)
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Be specific. Include menu options used and the exact output.
+      placeholder: |
+        1. Run `./mackeeper`
+        2. Choose menu option ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Paste the terminal output (you can strip ANSI colors with `| sed 's/\x1b\[[0-9;]*m//g'`).
+      render: text
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I ran `bash -n bin/mackeeper` and it passed
+        - label: This is not a feature request
+        - label: No secrets/private paths in the output I pasted
+    validations:
+      required: true

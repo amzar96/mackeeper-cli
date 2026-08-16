@@ -1,0 +1,54 @@
+name: First-time contributor welcome
+
+# Runs only for PRs from external forks (first-time contributors) and
+# leaves a friendly comment. Uses pull_request_target so the comment can be
+# written for fork PRs, but performs NO checkout of untrusted code and reads
+# no secrets.
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  welcome:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo, number } = context.issue;
+            const pr = context.payload.pull_request;
+            const author = pr.user.login;
+            const isFork = pr.head.repo.full_name !== `${owner}/${repo}`;
+
+            let comment;
+            if (isFork) {
+              comment = [
+                `👋 Hey @${author}, thanks for opening a PR from your fork!`,
+                ``,
+                `A maintainer will review it shortly. Meanwhile, a quick checklist for you:`,
+                ``,
+                `- [ ] Title follows Conventional Commits (e.g. \`fix: describe the change\`)`,
+                `- [ ] PR targets the \`main\` branch`,
+                `- [ ] \`bash -n bin/mackeeper\` passes (macOS bash 3.2 compatible)`,
+                `- [ ] No new dependencies added`,
+                `- [ ] Dry-run shown before any destructive action`,
+                ``,
+                `CI checks run in an isolated environment with **no access to secrets**, so nothing sensitive is at risk from fork PRs.`,
+              ].join('\n');
+            } else {
+              return; // branch PRs: no welcome needed
+            }
+
+            const { data: existing } = await github.rest.issues.listComments({
+              owner, repo, issue_number: number, per_page: 100,
+            });
+            const already = existing.some(c => c.body && c.body.includes('thanks for opening a PR from your fork'));
+            if (!already) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: number, body: comment });
+              console.log('welcome comment posted');
+            }
