@@ -24,3 +24,4 @@ Initial open-source release.
 - Persistent profile & all-time savings (`~/.mackeeper/config`)
 - Action history log (`~/.mackeeper/history.log`)
 - Theme selection (cyan / green / magenta / blue)
+# test line
