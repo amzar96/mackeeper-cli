@@ -18,7 +18,7 @@ jobs:
     name: Bash syntax check (3.2)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Syntax check with macOS bash 3.2
         run: |
           /bin/bash -n bin/mackeeper
@@ -32,7 +32,7 @@ jobs:
     name: ShellCheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Run shellcheck (non-blocking for bash 3.2 style)
@@ -42,7 +42,7 @@ jobs:
     name: Smoke test (dry-run categories)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Dry-run scan report
         run: |
           bash -c 'source bin/mackeeper; scan_overall' 
